@@ -1,0 +1,5 @@
+[[redirects]]
+  from = "/api/scrape"
+  to = "https://n8n-7tw0.onrender.com/webhook/lead-harvester"
+  status = 200
+  force = true
