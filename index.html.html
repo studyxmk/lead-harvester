@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Lead Harvester</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Bebas+Neue&display=swap" rel="stylesheet" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #080808; color: #fff; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+    @keyframes ripple { 0%{transform:scale(1);opacity:.6} 100%{transform:scale(1.7);opacity:0} }
+    @keyframes slideIn { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: #0d0d0d; }
+    ::-webkit-scrollbar-thumb { background: #222; border-radius: 2px; }
+    input { outline: none; transition: border-color .2s, box-shadow .2s; }
+    input:focus { border-color: #00FF94 !important; box-shadow: 0 0 0 1px #00FF9418 !important; }
+    button { cursor: pointer; transition: all .2s; }
+    button:hover:not(:disabled) { opacity: .88; }
+    button:active:not(:disabled) { transform: scale(.98); }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useRef, useEffect } = React;
+
+    const N8N_WEBHOOK_URL = "https://n8n-7tw0.onrender.com/webhook/lead-harvester";
+
+    const STAGES = [
+      { id:"maps",   icon:"🗺",  label:"Google Maps",  sublabel:"Fetching listings",  color:"#00FF94" },
+      { id:"urls",   icon:"🔗",  label:"URL Extract",  sublabel:"Parsing sites",      color:"#00D4FF" },
+      { id:"filter", icon:"⚡",  label:"Filter",       sublabel:"Removing junk",      color:"#FFD700" },
+      { id:"scrape", icon:"🔄",  label:"Scraping",     sublabel:"Visiting each site", color:"#FF6B35" },
+      { id:"emails", icon:"📧",  label:"Extracting",   sublabel:"Regex matching",     color:"#BD00FF" },
+      { id:"export", icon:"✅",  label:"Done",         sublabel:"Results ready",      color:"#00FF94" },
+    ];
+
+    function TerminalLog({ logs }) {
+      const bottomRef = useRef(null);
+      useEffect(() => { bottomRef.current?.scrollIntoView({ behavior:"smooth" }); }, [logs]);
+      return (
+        <div style={{ background:"#050505", border:"1px solid #181818", borderRadius:"8px", padding:"16px", fontFamily:"'Courier New',monospace", fontSize:"11px", lineHeight:"1.9", height:"220px", overflowY:"auto" }}>
+          {logs.map((log, i) => {
+            let color = "#444";
+            if (log.includes("[HTTP]"))  color = "#00D4FF";
+            if (log.includes("[EMAIL]")) color = "#BD00FF";
+            if (log.includes("✓") || log.includes("[DONE]")) color = "#00FF94";
+            if (log.includes("Error") || log.includes("❌")) color = "#FF4444";
+            if (log.includes("[WAIT]"))  color = "#FFD700";
+            if (log.includes("[INFO]"))  color = "#888";
+            return (
+              <div key={i} style={{ color, opacity: i === logs.length-1 ? 1 : 0.65 }}>
+                <span style={{ color:"#252525", marginRight:"8px" }}>{String(i+1).padStart(2,"0")}</span>
+                {log}
+                {i === logs.length-1 && <span style={{ display:"inline-block", width:"7px", height:"13px", background:"#00FF94", marginLeft:"4px", animation:"blink 1s step-end infinite" }} />}
+              </div>
+            );
+          })}
+          <div ref={bottomRef} />
+        </div>
+      );
+    }
+
+    function Stage({ stage, status }) {
+      const isDone   = status === "done";
+      const isActive = status === "active";
+      return (
+        <div style={{ flex:1, display:"flex", flexDirection:"column", alignItems:"center", position:"relative" }}>
+          <div style={{
+            width:"50px", height:"50px", borderRadius:"50%", zIndex:1, position:"relative",
+            border:`2px solid ${isDone||isActive ? stage.color : "#1e1e1e"}`,
+            background: isDone ? `${stage.color}20` : isActive ? `${stage.color}12` : "#0a0a0a",
+            display:"flex", alignItems:"center", justifyContent:"center", fontSize:"20px",
+            boxShadow: isActive ? `0 0 28px ${stage.color}55` : isDone ? `0 0 10px ${stage.color}22` : "none",
+            transition:"all 0.4s ease",
+          }}>
+            {isDone ? "✓" : stage.icon}
+            {isActive && <div style={{ position:"absolute", inset:"-7px", borderRadius:"50%", border:`1px solid ${stage.color}55`, animation:"ripple 1.4s ease-out infinite" }} />}
+          </div>
+          <div style={{ marginTop:"10px", textAlign:"center" }}>
+            <div style={{ fontSize:"9px", fontWeight:"700", letterSpacing:"0.06em", textTransform:"uppercase", color: isDone ? stage.color : isActive ? "#fff" : "#333", transition:"color 0.3s" }}>{stage.label}</div>
+            <div style={{ fontSize:"8px", color:"#252525", marginTop:"2px" }}>{stage.sublabel}</div>
+          </div>
+        </div>
+      );
+    }
+
+    function App() {
+      const [query,    setQuery]    = useState("calgary dentists");
+      const [limit,    setLimit]    = useState(10);
+      const [running,  setRunning]  = useState(false);
+      const [error,    setError]    = useState(null);
+      const [logs,     setLogs]     = useState([]);
+      const [emails,   setEmails]   = useState([]);
+      const [stageIdx, setStageIdx] = useState(-1);
+      const [stats,    setStats]    = useState({ found:0, scraped:0, exported:0 });
+
+      const addLog = (msg) => setLogs(prev => [...prev, msg]);
+
+      function advanceStages(durationMs) {
+        const step = durationMs / STAGES.length;
+        STAGES.forEach((_, i) => setTimeout(() => setStageIdx(i), step * i));
+      }
+
+      async function run() {
+        if (running) return;
+        setRunning(true);
+        setError(null);
+        setEmails([]);
+        setLogs([]);
+        setStageIdx(0);
+        setStats({ found:0, scraped:0, exported:0 });
+
+        addLog(`[INFO] Starting: "${query}" (limit: ${limit})`);
+        addLog(`[HTTP] POST ${N8N_WEBHOOK_URL}`);
+        addLog(`[INFO] Estimated time: ${limit * 2}–${limit * 3}s...`);
+
+        advanceStages(limit * 2500);
+
+        try {
+          const res = await fetch(N8N_WEBHOOK_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ query, limit }),
+          });
+
+          if (!res.ok) throw new Error(`HTTP ${res.status} — ${res.statusText}`);
+          const data = await res.json();
+          if (!data.success) throw new Error("Workflow returned success: false");
+
+          const results = data.emails || [];
+          setStageIdx(STAGES.length - 1);
+          addLog(`[HTTP] 200 OK — Response received`);
+          addLog(`[EMAIL] ${results.length} unique emails found`);
+          addLog(`[DONE] ✓ Workflow completed`);
+          setStats({ found: limit, scraped: limit, exported: results.length });
+          setEmails(results.map(e => ({ email: e.emails || e, source: e.website || "—" })));
+        } catch (err) {
+          setStageIdx(-1);
+          const msg = err.message.includes("Failed to fetch")
+            ? "❌ Cannot reach n8n. Check Render URL or CORS."
+            : `❌ ${err.message}`;
+          addLog(msg);
+          setError(msg);
+        } finally {
+          setRunning(false);
+        }
+      }
+
+      const getStatus = (i) => {
+        if (stageIdx < 0) return "pending";
+        if (i < stageIdx) return "done";
+        if (i === stageIdx) return "active";
+        return "pending";
+      };
+
+      const isDone = !running && emails.length > 0;
+
+      return (
+        <div style={{ minHeight:"100vh", background:"#080808", color:"#fff", fontFamily:"'DM Mono','Courier New',monospace", padding:"32px" }}>
+
+          {/* Header */}
+          <div style={{ marginBottom:"28px" }}>
+            <div style={{ display:"flex", alignItems:"baseline", gap:"14px", marginBottom:"6px" }}>
+              <h1 style={{ fontFamily:"'Bebas Neue',sans-serif", fontSize:"46px", letterSpacing:".08em", lineHeight:1 }}>LEAD</h1>
+              <h1 style={{ fontFamily:"'Bebas Neue',sans-serif", fontSize:"46px", letterSpacing:".08em", lineHeight:1, color:"#00FF94" }}>HARVESTER</h1>
+              <div style={{ marginLeft:"auto", display:"flex", alignItems:"center", gap:"8px", fontSize:"10px", color:"#333", letterSpacing:".1em" }}>
+                <div style={{ width:"6px", height:"6px", borderRadius:"50%", background: running ? "#00FF94" : isDone ? "#00D4FF" : "#2a2a2a", animation: running ? "blink 1s step-end infinite" : "none" }} />
+                {running ? "RUNNING" : isDone ? "COMPLETE" : "IDLE"}
+              </div>
+            </div>
+            <p style={{ color:"#2a2a2a", fontSize:"10px", letterSpacing:".12em" }}>GOOGLE MAPS → EMAIL SCRAPER — POWERED BY N8N · REAL DATA</p>
+          </div>
+
+          {/* Config */}
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 100px 160px", gap:"12px", marginBottom:"24px", alignItems:"end" }}>
+            <div>
+              <label style={{ fontSize:"9px", color:"#333", letterSpacing:".15em", display:"block", marginBottom:"6px" }}>SEARCH QUERY</label>
+              <input value={query} onChange={e=>setQuery(e.target.value)} disabled={running}
+                style={{ width:"100%", background:"#0d0d0d", border:"1px solid #1e1e1e", borderRadius:"6px", padding:"10px 14px", color:"#fff", fontSize:"13px", fontFamily:"inherit" }}
+                placeholder="e.g. toronto dentists" />
+            </div>
+            <div>
+              <label style={{ fontSize:"9px", color:"#333", letterSpacing:".15em", display:"block", marginBottom:"6px" }}>LIMIT</label>
+              <input type="number" value={limit} onChange={e=>setLimit(Number(e.target.value))} disabled={running} min={1} max={50}
+                style={{ width:"100%", background:"#0d0d0d", border:"1px solid #1e1e1e", borderRadius:"6px", padding:"10px 14px", color:"#fff", fontSize:"13px", fontFamily:"inherit" }} />
+            </div>
+            <button onClick={run} disabled={running}
+              style={{ background: running ? "#0a1a0a" : "#00FF94", color: running ? "#00FF94" : "#000", border: running ? "1px solid #00FF9444" : "none", borderRadius:"6px", padding:"10px 20px", fontSize:"11px", fontWeight:"700", letterSpacing:".1em", fontFamily:"inherit" }}>
+              {running ? "● RUNNING..." : "▶ RUN WORKFLOW"}
+            </button>
+          </div>
+
+          {/* Error */}
+          {error && (
+            <div style={{ background:"#1a0505", border:"1px solid #FF444433", borderRadius:"8px", padding:"12px 16px", marginBottom:"20px", fontSize:"11px", color:"#FF6666", fontFamily:"monospace" }}>
+              {error}
+              <div style={{ marginTop:"6px", color:"#555", fontSize:"10px" }}>→ Make sure N8N_CORS_ALLOW_ORIGIN=* is set in Render environment variables</div>
+            </div>
+          )}
+
+          {/* Pipeline */}
+          <div style={{ background:"#0d0d0d", border:"1px solid #181818", borderRadius:"12px", padding:"28px 20px", marginBottom:"20px" }}>
+            <div style={{ fontSize:"9px", color:"#2a2a2a", letterSpacing:".15em", marginBottom:"22px" }}>PIPELINE — {STAGES.length} STAGES</div>
+            <div style={{ display:"flex", position:"relative" }}>
+              {STAGES.map((s, i) => (
+                <div key={s.id} style={{ flex:1, display:"flex", flexDirection:"column", alignItems:"center", position:"relative" }}>
+                  {i < STAGES.length-1 && (
+                    <div style={{ position:"absolute", top:"24px", left:"50%", right:"-50%", height:"1px", background: getStatus(i)==="done" ? `${s.color}55` : "#181818", zIndex:0, transition:"background .5s" }} />
+                  )}
+                  <Stage stage={s} status={getStatus(i)} />
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Stats */}
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:"12px", marginBottom:"20px" }}>
+            {[
+              { label:"SITES FOUND",   val: stats.found,    color:"#00D4FF" },
+              { label:"SITES SCRAPED", val: stats.scraped,  color:"#FF6B35" },
+              { label:"EMAILS FOUND",  val: stats.exported, color:"#00FF94" },
+            ].map(s => (
+              <div key={s.label} style={{ background:"#0d0d0d", border:"1px solid #181818", borderRadius:"8px", padding:"16px 20px" }}>
+                <div style={{ fontSize:"9px", color:"#2a2a2a", letterSpacing:".15em", marginBottom:"8px" }}>{s.label}</div>
+                <div style={{ fontSize:"34px", fontFamily:"'Bebas Neue',sans-serif", color: s.val>0 ? s.color : "#1e1e1e", letterSpacing:".05em", lineHeight:1, transition:"color .3s" }}>{s.val}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Log + Results */}
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"16px" }}>
+            <div>
+              <div style={{ fontSize:"9px", color:"#2a2a2a", letterSpacing:".15em", marginBottom:"10px" }}>LIVE LOG</div>
+              <TerminalLog logs={logs.length > 0 ? logs : ["Workflow idle. Click RUN to start."]} />
+            </div>
+            <div>
+              <div style={{ fontSize:"9px", color:"#2a2a2a", letterSpacing:".15em", marginBottom:"10px" }}>RESULTS — {emails.length} EMAIL{emails.length !== 1 ? "S" : ""}</div>
+              <div style={{ background:"#050505", border:"1px solid #181818", borderRadius:"8px", height:"220px", overflowY:"auto" }}>
+                {emails.length === 0 ? (
+                  <div style={{ padding:"20px 16px", color:"#1e1e1e", fontSize:"11px", fontFamily:"monospace" }}>
+                    {running ? "Waiting for results..." : "No emails yet. Run the workflow."}
+                  </div>
+                ) : emails.map((e, i) => (
+                  <div key={i} style={{ padding:"10px 16px", borderBottom:"1px solid #0f0f0f", display:"flex", alignItems:"center", justifyContent:"space-between", animation:"slideIn .3s ease", animationDelay:`${i*50}ms`, animationFillMode:"both" }}>
+                    <div>
+                      <div style={{ fontSize:"12px", color:"#00FF94", fontFamily:"monospace" }}>{e.email}</div>
+                      <div style={{ fontSize:"10px", color:"#2a2a2a", marginTop:"2px" }}>{e.source}</div>
+                    </div>
+                    <div onClick={() => navigator.clipboard?.writeText(e.email)}
+                      style={{ fontSize:"9px", color:"#00FF94", background:"#00FF9410", border:"1px solid #00FF9420", borderRadius:"4px", padding:"2px 8px", letterSpacing:".1em", cursor:"pointer" }}>
+                      COPY
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Footer */}
+          <div style={{ marginTop:"24px", paddingTop:"16px", borderTop:"1px solid #111", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+            <div style={{ fontSize:"9px", color:"#1e1e1e", letterSpacing:".1em" }}>N8N ON RENDER · REAL SCRAPING · NO PAID APIs</div>
+            {isDone && <div style={{ fontSize:"10px", color:"#00FF94", letterSpacing:".1em", animation:"slideIn .4s ease" }}>✓ {emails.length} EMAILS EXTRACTED</div>}
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
